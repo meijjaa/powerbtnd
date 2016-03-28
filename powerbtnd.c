@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
+#include <string.h>
 #include <cutils/log.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
@@ -38,18 +39,18 @@ int openfds(struct pollfd pfds[])
 			snprintf(name, PATH_MAX, "%s/%s", dirname, de->d_name);
 			fd = open(name, O_RDWR | O_NONBLOCK);
 			if (fd < 0) {
-				LOGE("could not open %s, %s", name, strerror(errno));
+				ALOGE("could not open %s, %s", name, strerror(errno));
 				continue;
 			}
 			name[sizeof(name) - 1] = '\0';
 			if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), &name) < 1) {
-				LOGE("could not get device name for %s, %s\n", name, strerror(errno));
+				ALOGE("could not get device name for %s, %s", name, strerror(errno));
 				name[0] = '\0';
 			}
 
 			// TODO: parse /etc/excluded-input-devices.xml
 			if (!strcmp(name, "Power Button")) {
-				LOGI("open %s(%s) ok", de->d_name, name);
+				ALOGI("open %s(%s) ok fd=%d", de->d_name, name, fd);
 				pfds[cnt].events = POLLIN;
 				pfds[cnt++].fd = fd;
 				if (cnt < MAX_POWERBTNS)
@@ -91,6 +92,7 @@ int main()
 	struct pollfd pfds[MAX_POWERBTNS];
 	int cnt = openfds(pfds);
 	int timeout = -1;
+	int longpress = 1;
 	char prop[PROPERTY_VALUE_MAX];
 
 	int ufd = open("/dev/uinput", O_WRONLY | O_NDELAY);
@@ -103,7 +105,7 @@ int main()
 		ioctl(ufd, UI_SET_KEYBIT, KEY_POWER);
 		ioctl(ufd, UI_DEV_CREATE, 0);
 	} else {
-		LOGE("could not open uinput device: %s", strerror(errno));
+		ALOGE("could not open uinput device: %s", strerror(errno));
 		return -1;
 	}
 
@@ -112,14 +114,16 @@ int main()
 	for (;;) {
 		int i;
 		int pollres = poll(pfds, cnt, timeout) ;
-		LOGV("pollres=%d %d\n", pollres, timeout);
+		ALOGV("pollres=%d %d\n", pollres, timeout);
 		if (pollres < 0) {
-			LOGE("poll error: %s", strerror(errno));
+			ALOGE("poll error: %s", strerror(errno));
 			break;
 		}
-		if (pollres == 0) { // timeout, send one power key
+		if (pollres == 0) {
+			ALOGI("timeout, send one power key");
 			simulate_powerkey(ufd, 0);
 			timeout = -1;
+			longpress = 1;
 			continue;
 		}
 		for (i = 0; i < cnt; ++i) {
@@ -127,17 +131,21 @@ int main()
 				struct input_event iev;
 				size_t res = read(pfds[i].fd, &iev, sizeof(iev));
 				if (res < sizeof(iev)) {
-					LOGW("insufficient input data(%d)? fd=%d", res, pfds[i].fd);
+					ALOGW("insufficient input data(%zd)? fd=%d", res, pfds[i].fd);
 					continue;
 				}
-				LOGV("type=%d scancode=%d value=%d from fd=%d", iev.type, iev.code, iev.value, pfds[i].fd);
+				ALOGD("type=%d scancode=%d value=%d from fd=%d", iev.type, iev.code, iev.value, pfds[i].fd);
 				if (iev.type == EV_KEY && iev.code == KEY_POWER && !iev.value) {
 					if (prop[0] != '1' || timeout > 0) {
-						simulate_powerkey(ufd, 1);
+						simulate_powerkey(ufd, longpress);
 						timeout = -1;
 					} else {
 						timeout = 1000; // one second
 					}
+				} else if (iev.type == EV_SYN && iev.code == SYN_REPORT && iev.value) {
+					ALOGI("got a resuming event");
+					longpress = 0;
+					timeout = 1000; // one second
 				}
 			}
 		}
